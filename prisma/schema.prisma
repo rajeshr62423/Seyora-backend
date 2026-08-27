@@ -1,0 +1,385 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           Int      @id @default(autoincrement())
+  name         String
+  email        String   @unique
+  passwordHash String
+  // Free-text job title (e.g. "Senior Developer") — distinct from
+  // OrganizationMember.role, which is the permission level (Owner/Admin/
+  // Manager/Member). Keeping this field name/shape unchanged since the
+  // auth module already ships it in AuthUser.
+  role         String   @default("Member")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  organizations         OrganizationMember[]
+  projects              ProjectMember[]
+  ownedProjects         Project[]
+  assignedTasks         Task[]
+  taskComments          TaskComment[]
+  activityEntries       ActivityEntry[]
+  receivedNotifications Notification[]        @relation("NotificationRecipient")
+  sentNotifications     Notification[]        @relation("NotificationActor")
+  channelMemberships    ChannelMember[]
+  messages              Message[]
+  notificationPreference NotificationPreference?
+}
+
+model Organization {
+  id            Int      @id @default(autoincrement())
+  name          String
+  slug          String   @unique
+  projectPrefix String   @default("DEV")
+  timezone      String   @default("UTC")
+  // Atomically incremented (via `{ increment: 1 }`) to mint task codes like
+  // "DEV-241" — one sequence per org, shared across all of its projects,
+  // matching the frontend's mock task-id format.
+  taskCounter   Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  members         OrganizationMember[]
+  projects        Project[]
+  tasks           Task[]
+  activityEntries ActivityEntry[]
+  channels        Channel[]
+  invitations     Invitation[]
+  apiKeys         ApiKey[]
+  webhooks        Webhook[]
+  subscription    Subscription?
+  payments        Payment[]
+  integrations    Integration[]
+}
+
+enum OrgRole {
+  OWNER
+  ADMIN
+  MANAGER
+  MEMBER
+}
+
+model OrganizationMember {
+  id             Int      @id @default(autoincrement())
+  organizationId Int
+  userId         Int
+  role           OrgRole  @default(MEMBER)
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  user         User         @relation(fields: [userId], references: [id])
+
+  @@unique([organizationId, userId])
+}
+
+enum ProjectStatus {
+  BACKLOG
+  IN_PROGRESS
+  IN_REVIEW
+  ON_TRACK
+}
+
+model Project {
+  id             Int           @id @default(autoincrement())
+  organizationId Int
+  ownerId        Int
+  name           String
+  slug           String
+  description    String?
+  status         ProjectStatus @default(BACKLOG)
+  color          String        @default("#10B981")
+  dueDate        DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  organization Organization    @relation(fields: [organizationId], references: [id])
+  owner        User            @relation(fields: [ownerId], references: [id])
+  members      ProjectMember[]
+  tasks        Task[]
+
+  @@unique([organizationId, slug])
+}
+
+model ProjectMember {
+  id        Int      @id @default(autoincrement())
+  projectId Int
+  userId    Int
+  createdAt DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id])
+  user    User    @relation(fields: [userId], references: [id])
+
+  @@unique([projectId, userId])
+}
+
+enum TaskStatus {
+  BACKLOG
+  TODO
+  IN_PROGRESS
+  IN_REVIEW
+  DONE
+}
+
+enum TaskPriority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+model Task {
+  id             Int          @id @default(autoincrement())
+  code           String
+  organizationId Int
+  projectId      Int
+  assigneeId     Int?
+  title          String
+  description    String?
+  status         TaskStatus   @default(TODO)
+  priority       TaskPriority @default(MEDIUM)
+  dueDate        DateTime?
+  completedAt    DateTime?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  organization Organization  @relation(fields: [organizationId], references: [id])
+  project      Project       @relation(fields: [projectId], references: [id])
+  assignee     User?         @relation(fields: [assigneeId], references: [id])
+  subtasks     Subtask[]
+  comments     TaskComment[]
+
+  @@unique([organizationId, code])
+}
+
+model Subtask {
+  id     Int     @id @default(autoincrement())
+  taskId Int
+  title  String
+  done   Boolean @default(false)
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+}
+
+model TaskComment {
+  id        Int      @id @default(autoincrement())
+  taskId    Int
+  authorId  Int
+  body      String
+  createdAt DateTime @default(now())
+
+  task   Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  author User @relation(fields: [authorId], references: [id])
+}
+
+// Written as a side effect of other services' actions (see ActivityService),
+// never created directly from a controller. targetLabel is a denormalized
+// snapshot (e.g. the project/task name at the time of the event) so the
+// feed still reads correctly even if the target is later renamed or deleted.
+model ActivityEntry {
+  id             Int      @id @default(autoincrement())
+  organizationId Int
+  actorId        Int
+  action         String
+  targetType     String
+  targetId       Int
+  targetLabel    String
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  actor        User         @relation(fields: [actorId], references: [id])
+}
+
+enum NotificationCategory {
+  MENTION
+  ASSIGN
+  COMMENT
+  UPDATE
+  SYSTEM
+}
+
+// Also written as a side effect (see NotificationsService.notify), not via a
+// public create endpoint. actorId is nullable for SYSTEM notifications that
+// aren't attributable to another user.
+model Notification {
+  id          Int                  @id @default(autoincrement())
+  recipientId Int
+  actorId     Int?
+  verb        String
+  targetLabel String
+  category    NotificationCategory
+  unread      Boolean              @default(true)
+  createdAt   DateTime             @default(now())
+
+  recipient User  @relation("NotificationRecipient", fields: [recipientId], references: [id])
+  actor     User? @relation("NotificationActor", fields: [actorId], references: [id])
+}
+
+model Channel {
+  id             Int      @id @default(autoincrement())
+  organizationId Int
+  name           String
+  createdAt      DateTime @default(now())
+
+  organization Organization    @relation(fields: [organizationId], references: [id])
+  members      ChannelMember[]
+  messages     Message[]
+
+  @@unique([organizationId, name])
+}
+
+model ChannelMember {
+  id         Int       @id @default(autoincrement())
+  channelId  Int
+  userId     Int
+  // Set on join and bumped every time the member fetches the message list —
+  // unread count is `messages.createdAt > lastReadAt`, matching the
+  // frontend mock's per-channel `unread` field with a real computation.
+  lastReadAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id])
+
+  @@unique([channelId, userId])
+}
+
+model Message {
+  id        Int      @id @default(autoincrement())
+  channelId Int
+  authorId  Int
+  text      String
+  createdAt DateTime @default(now())
+
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  author  User    @relation(fields: [authorId], references: [id])
+}
+
+// The invited person doesn't need an account yet at invite time — they
+// register/log in with the invited email, then call POST
+// /invitations/:token/accept, which checks the email matches before
+// creating their OrganizationMember row.
+model Invitation {
+  id             Int       @id @default(autoincrement())
+  organizationId Int
+  email          String
+  role           OrgRole   @default(MEMBER)
+  token          String    @unique
+  expiresAt      DateTime
+  acceptedAt     DateTime?
+  createdAt      DateTime  @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+}
+
+// Lazily created on first read (see NotificationPreferencesService) rather
+// than at registration, so User creation doesn't need to know about it.
+model NotificationPreference {
+  id              Int     @id @default(autoincrement())
+  userId          Int     @unique
+  emailEnabled    Boolean @default(true)
+  taskAssignments Boolean @default(true)
+  mentions        Boolean @default(true)
+  comments        Boolean @default(true)
+  projectUpdates  Boolean @default(true)
+  securityAlerts  Boolean @default(true)
+  weeklySummary   Boolean @default(false)
+
+  user User @relation(fields: [userId], references: [id])
+}
+
+// The raw key is only ever returned once, in the create response — like a
+// password, we store a bcrypt hash and can never recover it. `preview`
+// (e.g. "sk_live_ab12...wxyz") is a separately stored, non-secret slice
+// safe to show in the list UI so a revoked/lost key is still identifiable.
+model ApiKey {
+  id             Int       @id @default(autoincrement())
+  organizationId Int
+  name           String
+  hashedKey      String
+  preview        String
+  lastUsedAt     DateTime?
+  revokedAt      DateTime?
+  createdAt      DateTime  @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+}
+
+// Unlike ApiKey, the secret is stored in recoverable plaintext (not
+// hashed) — it's needed on every outbound delivery to HMAC-sign the
+// payload, so the server must be able to read it back, not just verify it.
+model Webhook {
+  id             Int       @id @default(autoincrement())
+  organizationId Int
+  url            String
+  events         String[]
+  secret         String
+  lastDeliveryAt DateTime?
+  createdAt      DateTime  @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+}
+
+// One row per org, lazily created on first read (see BillingService). No
+// separate "status" field — plan is always live; downgrading to "free" just
+// resets planKey and clears currentPeriodEnd. Renewal is manual (re-checkout
+// before the period ends), not an auto-recurring Razorpay Subscription —
+// the smaller, scriptable MVP given only Orders-level API credentials.
+model Subscription {
+  id               Int       @id @default(autoincrement())
+  organizationId   Int       @unique
+  planKey          String    @default("free")
+  currentPeriodEnd DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+}
+
+// One row per Razorpay order, created in "created" state at checkout and
+// flipped to "paid" once BillingService.verifyPayment confirms the HMAC
+// signature Razorpay returns to the client after a successful charge.
+model Payment {
+  id                Int      @id @default(autoincrement())
+  organizationId    Int
+  planKey           String
+  amountInPaise     Int
+  currency          String   @default("INR")
+  status            String   @default("created")
+  razorpayOrderId   String   @unique
+  razorpayPaymentId String?
+  createdAt         DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+}
+
+// Tracks connection status only — no OAuth token exchange or real API calls
+// (that needs a provider's OAuth app credentials, which aren't available
+// here; see PLANNING.md Phase 8). A missing row means "disconnected"; GET
+// synthesizes that default rather than pre-creating rows for every known
+// provider.
+model Integration {
+  id             Int       @id @default(autoincrement())
+  organizationId Int
+  provider       String
+  label          String?
+  connectedAt    DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+
+  @@unique([organizationId, provider])
+}
