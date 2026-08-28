@@ -124,6 +124,7 @@ export class AnalyticsService {
         userId: user.id,
         name: user.name,
         initials: getInitials(user.name),
+        avatarUrl: user.avatarUrl,
         assigned: stats.assigned,
         completed: stats.completed,
         openTasks: stats.assigned - stats.completed,

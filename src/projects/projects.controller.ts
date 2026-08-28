@@ -12,6 +12,9 @@ import {
 } from '@nestjs/common';
 import type { Request } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { PermissionsGuard } from '../auth/guards/permissions.guard';
+import { RequirePermission } from '../auth/decorators/permissions.decorator';
+import { Permission } from '../auth/enums/permission.enum';
 import type { RequestUser } from '../auth/strategies/jwt.strategy';
 import { ResponseMessage } from '../common/decorators/response-message.decorator';
 import { CreateProjectDto } from './dto/create-project.dto';
@@ -20,11 +23,12 @@ import { UpdateProjectDto } from './dto/update-project.dto';
 import { ProjectsService } from './projects.service';
 
 @Controller('projects')
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, PermissionsGuard)
 export class ProjectsController {
   constructor(private readonly projectsService: ProjectsService) {}
 
   @ResponseMessage('Projects fetched successfully')
+  @RequirePermission(Permission.PROJECT_VIEW)
   @Get()
   findAll(
     @Req() req: Request & { user: RequestUser },
@@ -34,6 +38,7 @@ export class ProjectsController {
   }
 
   @ResponseMessage('Project created successfully')
+  @RequirePermission(Permission.PROJECT_CREATE)
   @Post()
   create(
     @Req() req: Request & { user: RequestUser },
@@ -43,6 +48,7 @@ export class ProjectsController {
   }
 
   @ResponseMessage('Project fetched successfully')
+  @RequirePermission(Permission.PROJECT_VIEW)
   @Get(':slug')
   findOne(
     @Req() req: Request & { user: RequestUser },
@@ -52,6 +58,7 @@ export class ProjectsController {
   }
 
   @ResponseMessage('Project updated successfully')
+  @RequirePermission(Permission.PROJECT_UPDATE)
   @Patch(':id')
   update(
     @Req() req: Request & { user: RequestUser },

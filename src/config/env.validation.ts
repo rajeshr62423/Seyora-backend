@@ -1,8 +1,10 @@
 import { plainToInstance } from 'class-transformer';
 import {
+  IsEmail,
   IsIn,
   IsInt,
   IsNotEmpty,
+  IsOptional,
   IsString,
   IsUrl,
   Max,
@@ -49,6 +51,49 @@ class EnvironmentVariables {
   @IsString()
   @IsNotEmpty()
   RAZOR_SECRET_KEY: string;
+
+  // Frontend origin invitation emails link back to
+  // (${APP_URL}/invitations/accept?token=...) — deliberately separate from
+  // CORS_ORIGIN even though they're the same value today, since CORS_ORIGIN
+  // is an API-server concern and APP_URL is an email-content concern.
+  @IsUrl({ require_tld: false })
+  APP_URL: string;
+
+  @IsInt()
+  @Min(1)
+  INVITATION_EXPIRES_IN_HOURS: number;
+
+  // Optional, unlike the others above — defaults to 1 hour in code
+  // (AuthService.forgotPassword) when unset, so adding this feature never
+  // required touching an already-deployed .env.
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  PASSWORD_RESET_EXPIRES_IN_HOURS?: number;
+
+  @IsString()
+  @IsNotEmpty()
+  MAIL_FROM_NAME: string;
+
+  @IsEmail()
+  SENDER_MAIL: string;
+
+  @IsString()
+  @IsNotEmpty()
+  SMTP_HOST: string;
+
+  @IsInt()
+  @Min(1)
+  @Max(65535)
+  SMTP_PORT: number;
+
+  @IsString()
+  @IsNotEmpty()
+  BREVO_SMTP_LOGIN: string;
+
+  @IsString()
+  @IsNotEmpty()
+  BREVO_SMTP_API_KEY: string;
 }
 
 export function validate(config: Record<string, unknown>) {

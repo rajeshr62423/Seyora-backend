@@ -1,6 +1,15 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ForbiddenException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { NotificationCategory, Prisma, TaskStatus } from '@prisma/client';
 import { ActivityService } from '../activity/activity.service';
+import { ROLE_PERMISSIONS } from '../auth/constants/role-permissions';
+import { Permission } from '../auth/enums/permission.enum';
+import { MailService } from '../common/mail/mail.service';
+import { formatEnumLabel } from '../common/utils/format-enum-label';
 import { NotificationsService } from '../notifications/notifications.service';
 import { OrganizationsService } from '../organizations/organizations.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -31,11 +40,14 @@ type TaskWithProject = Prisma.TaskGetPayload<{
 
 @Injectable()
 export class TasksService {
+  private readonly logger = new Logger(TasksService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly organizationsService: OrganizationsService,
     private readonly activityService: ActivityService,
     private readonly notificationsService: NotificationsService,
+    private readonly mailService: MailService,
   ) {}
 
   async findAllForProject(userId: number, projectId: number) {
@@ -104,13 +116,20 @@ export class TasksService {
       targetLabel: `${task.code}: ${task.title}`,
     });
 
-    if (input.assigneeId !== undefined && input.assigneeId !== userId) {
-      await this.notificationsService.notify({
-        recipientId: input.assigneeId,
+    if (
+      input.assigneeId !== undefined &&
+      input.assigneeId !== userId &&
+      task.assignee
+    ) {
+      await this.notifyAssignment({
         actorId: userId,
-        verb: 'assigned you to',
-        targetLabel: `${task.code}: ${task.title}`,
-        category: NotificationCategory.ASSIGN,
+        assigneeId: input.assigneeId,
+        assigneeEmail: task.assignee.email,
+        taskCode: task.code,
+        taskTitle: task.title,
+        taskDescription: task.description,
+        projectName: project.name,
+        dueDate: task.dueDate,
       });
     }
 
@@ -126,12 +145,47 @@ export class TasksService {
     return this.sanitize(task);
   }
 
+  // Org is derived from the caller's own membership, never trusted from
+  // the URL — a code from a different organization simply won't match the
+  // compound unique key, so no separate assertMembership call is needed
+  // (same reasoning as findMine).
+  async findByCode(userId: number, code: string) {
+    const organization =
+      await this.organizationsService.getCurrentForUser(userId);
+
+    const task = await this.prisma.task.findUnique({
+      where: { organizationId_code: { organizationId: organization.id, code } },
+      include: TASK_WITH_PROJECT_INCLUDE,
+    });
+    if (!task) {
+      throw new NotFoundException('Task not found');
+    }
+    return this.sanitize(task);
+  }
+
   async update(userId: number, taskId: number, input: UpdateTaskDto) {
     const task = await this.getTaskOrThrow(taskId);
-    await this.organizationsService.assertMembership(
+    const actingMembership = await this.organizationsService.assertMembership(
       task.organizationId,
       userId,
     );
+    // TASK_UPDATE (checked by PermissionsGuard on the route) covers
+    // ordinary field edits; reassigning the task is a stricter, separate
+    // permission — MEMBER has TASK_UPDATE but not TASK_ASSIGN, and must
+    // still be able to edit a task's other fields without touching its
+    // assignee, so this is only enforced when assigneeId is actually part
+    // of the request.
+    if (input.assigneeId !== undefined) {
+      if (
+        !ROLE_PERMISSIONS[actingMembership.role].includes(
+          Permission.TASK_ASSIGN,
+        )
+      ) {
+        throw new ForbiddenException(
+          'Missing required permission: TASK_ASSIGN',
+        );
+      }
+    }
     if (input.assigneeId !== undefined && input.assigneeId !== null) {
       await this.organizationsService.assertMembership(
         task.organizationId,
@@ -164,7 +218,18 @@ export class TasksService {
       await this.activityService.log({
         organizationId: task.organizationId,
         actorId: userId,
-        action: `moved task to ${input.status}`,
+        action: `changed status from ${formatEnumLabel(task.status)} to ${formatEnumLabel(input.status)}`,
+        targetType: 'task',
+        targetId: task.id,
+        targetLabel: `${task.code}: ${updated.title}`,
+      });
+    }
+
+    if (input.priority && input.priority !== task.priority) {
+      await this.activityService.log({
+        organizationId: task.organizationId,
+        actorId: userId,
+        action: `changed priority from ${formatEnumLabel(task.priority)} to ${formatEnumLabel(input.priority)}`,
         targetType: 'task',
         targetId: task.id,
         targetLabel: `${task.code}: ${updated.title}`,
@@ -180,23 +245,60 @@ export class TasksService {
       await this.activityService.log({
         organizationId: task.organizationId,
         actorId: userId,
-        action: 'reassigned task',
+        action: `assigned task to ${updated.assignee?.name ?? 'someone'}`,
         targetType: 'task',
         targetId: task.id,
         targetLabel: `${task.code}: ${updated.title}`,
       });
-      if (newAssigneeId !== userId) {
-        await this.notificationsService.notify({
-          recipientId: newAssigneeId,
+      if (newAssigneeId !== userId && updated.assignee) {
+        await this.notifyAssignment({
           actorId: userId,
-          verb: 'assigned you to',
-          targetLabel: `${task.code}: ${updated.title}`,
-          category: NotificationCategory.ASSIGN,
+          assigneeId: newAssigneeId,
+          assigneeEmail: updated.assignee.email,
+          taskCode: task.code,
+          taskTitle: updated.title,
+          taskDescription: updated.description,
+          projectName: task.project.name,
+          dueDate: updated.dueDate,
         });
       }
+    } else if (newAssigneeId === null && task.assigneeId !== null) {
+      await this.activityService.log({
+        organizationId: task.organizationId,
+        actorId: userId,
+        action: 'unassigned task',
+        targetType: 'task',
+        targetId: task.id,
+        targetLabel: `${task.code}: ${updated.title}`,
+      });
     }
 
     return this.sanitize(updated);
+  }
+
+  async remove(userId: number, taskId: number) {
+    const task = await this.getTaskOrThrow(taskId);
+    await this.organizationsService.assertMembership(
+      task.organizationId,
+      userId,
+    );
+
+    // Subtasks/comments cascade at the DB level (onDelete: Cascade in the
+    // schema) — no manual cleanup needed. ActivityEntry has no FK to Task
+    // (targetId is a plain Int), so past entries survive as a denormalized
+    // snapshot, same as any other renamed/deleted target.
+    await this.prisma.task.delete({ where: { id: taskId } });
+
+    await this.activityService.log({
+      organizationId: task.organizationId,
+      actorId: userId,
+      action: 'deleted task',
+      targetType: 'task',
+      targetId: task.id,
+      targetLabel: `${task.code}: ${task.title}`,
+    });
+
+    return { id: taskId };
   }
 
   async addSubtask(userId: number, taskId: number, input: CreateSubtaskDto) {
@@ -294,6 +396,59 @@ export class TasksService {
     }));
   }
 
+  // Shared by create() and update() — both call this only when the
+  // assignee has actually changed to someone other than the acting user
+  // (never on unassign, never on a reassign-away notifying the old
+  // assignee, never on self-assignment). Fires the in-app notification and
+  // the email; an email failure is caught and swallowed here so it can
+  // never roll back or fail the task mutation that already succeeded.
+  private async notifyAssignment(params: {
+    actorId: number;
+    assigneeId: number;
+    assigneeEmail: string;
+    taskCode: string;
+    taskTitle: string;
+    taskDescription: string | null;
+    projectName: string;
+    dueDate: Date | null;
+  }) {
+    const actor = await this.prisma.user.findUnique({
+      where: { id: params.actorId },
+      select: { name: true },
+    });
+
+    await this.notificationsService.notify({
+      recipientId: params.assigneeId,
+      actorId: params.actorId,
+      verb: 'assigned you to',
+      targetLabel: `${params.taskCode}: ${params.taskTitle}`,
+      category: NotificationCategory.ASSIGN,
+      targetType: 'task',
+      targetRef: params.taskCode,
+    });
+
+    try {
+      await this.mailService.sendTaskAssignmentEmail({
+        to: params.assigneeEmail,
+        taskTitle: params.taskTitle,
+        taskDescription: params.taskDescription,
+        taskCode: params.taskCode,
+        assignedByName: actor?.name ?? 'A teammate',
+        projectName: params.projectName,
+        dueDate: params.dueDate
+          ? params.dueDate.toISOString().slice(0, 10)
+          : null,
+      });
+    } catch {
+      // MailService already logged the technical failure (see
+      // MailService#send) — nothing further to do here except make sure it
+      // never propagates and turns a successful assignment into a 500.
+      this.logger.warn(
+        `Task assignment email failed for task ${params.taskCode} — in-app notification was still created`,
+      );
+    }
+  }
+
   private async getProjectOrThrow(projectId: number) {
     const project = await this.prisma.project.findUnique({
       where: { id: projectId },
@@ -305,7 +460,14 @@ export class TasksService {
   }
 
   private async getTaskOrThrow(taskId: number) {
-    const task = await this.prisma.task.findUnique({ where: { id: taskId } });
+    // Includes the project's name (not the full row) purely so update()
+    // can build a task-assignment email without a second query — every
+    // other caller of this helper (remove/addSubtask/etc.) just ignores
+    // the extra field.
+    const task = await this.prisma.task.findUnique({
+      where: { id: taskId },
+      include: { project: { select: { name: true } } },
+    });
     if (!task) {
       throw new NotFoundException('Task not found');
     }

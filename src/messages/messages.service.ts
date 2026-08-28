@@ -9,9 +9,10 @@ import { PrismaService } from '../prisma/prisma.service';
 import { UsersService } from '../users/users.service';
 import { CreateChannelDto } from './dto/create-channel.dto';
 import { CreateMessageDto } from './dto/create-message.dto';
+import { UpdateChannelDto } from './dto/update-channel.dto';
 
 const CHANNEL_WITH_MEMBERS = {
-  members: true,
+  members: { include: { user: true } },
 } satisfies Prisma.ChannelInclude;
 
 @Injectable()
@@ -60,6 +61,58 @@ export class MessagesService {
           })),
         },
       },
+      include: CHANNEL_WITH_MEMBERS,
+    });
+
+    return this.toChannelSummary(channel, userId);
+  }
+
+  // No channel-level roles exist (any member can rename or manage
+  // membership) — matches the low-friction model the rest of chat already
+  // uses (any member can post, no owner/admin concept on a Channel).
+  async updateChannel(
+    userId: number,
+    channelId: number,
+    input: UpdateChannelDto,
+  ) {
+    const organization =
+      await this.organizationsService.getCurrentForUser(userId);
+    await this.assertChannelMembership(userId, channelId);
+
+    if (input.memberIds !== undefined) {
+      const desiredIds = new Set(input.memberIds);
+      desiredIds.add(userId); // never let the editor remove themselves by omission
+
+      for (const id of desiredIds) {
+        if (id !== userId) {
+          await this.organizationsService.assertMembership(organization.id, id);
+        }
+      }
+
+      const current = await this.prisma.channelMember.findMany({
+        where: { channelId },
+        select: { userId: true },
+      });
+      const currentIds = new Set(current.map((m) => m.userId));
+
+      const toAdd = [...desiredIds].filter((id) => !currentIds.has(id));
+      const toRemove = [...currentIds].filter((id) => !desiredIds.has(id));
+
+      if (toRemove.length > 0) {
+        await this.prisma.channelMember.deleteMany({
+          where: { channelId, userId: { in: toRemove } },
+        });
+      }
+      if (toAdd.length > 0) {
+        await this.prisma.channelMember.createMany({
+          data: toAdd.map((id) => ({ channelId, userId: id })),
+        });
+      }
+    }
+
+    const channel = await this.prisma.channel.update({
+      where: { id: channelId },
+      data: input.name !== undefined ? { name: input.name } : {},
       include: CHANNEL_WITH_MEMBERS,
     });
 
@@ -151,6 +204,7 @@ export class MessagesService {
       createdAt: channel.createdAt,
       memberCount: channel.members.length,
       unread,
+      members: channel.members.map((m) => UsersService.toPublic(m.user)),
     };
   }
 }

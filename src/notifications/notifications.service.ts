@@ -13,6 +13,10 @@ export interface NotifyInput {
   verb: string;
   targetLabel: string;
   category: NotificationCategory;
+  // Optional deep link — e.g. { targetType: 'task', targetRef: task.code }
+  // so the notification bell can link straight to the task.
+  targetType?: string;
+  targetRef?: string;
 }
 
 @Injectable()

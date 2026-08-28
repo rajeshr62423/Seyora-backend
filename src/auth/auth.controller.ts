@@ -12,8 +12,10 @@ import type { Request } from 'express';
 import { ResponseMessage } from '../common/decorators/response-message.decorator';
 import { AuthService } from './auth.service';
 import { ChangePasswordDto } from './dto/change-password.dto';
+import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
+import { ResetPasswordDto } from './dto/reset-password.dto';
 import { RefreshDto } from './dto/refresh.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import type { RequestUser } from './strategies/jwt.strategy';
@@ -58,6 +60,24 @@ export class AuthController {
     @Body() dto: ChangePasswordDto,
   ) {
     await this.authService.changePassword(req.user.id, dto);
+    return null;
+  }
+
+  // Always 200, whether or not the email is registered — see
+  // AuthService.forgotPassword for why the response can't vary.
+  @ResponseMessage('If that email is registered, a reset link has been sent')
+  @HttpCode(HttpStatus.OK)
+  @Post('forgot-password')
+  async forgotPassword(@Body() dto: ForgotPasswordDto) {
+    await this.authService.forgotPassword(dto);
+    return null;
+  }
+
+  @ResponseMessage('Password reset successfully')
+  @HttpCode(HttpStatus.OK)
+  @Post('reset-password')
+  async resetPassword(@Body() dto: ResetPasswordDto) {
+    await this.authService.resetPassword(dto);
     return null;
   }
 }

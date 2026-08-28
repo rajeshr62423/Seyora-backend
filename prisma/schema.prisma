@@ -23,6 +23,10 @@ model User {
   // Manager/Member). Keeping this field name/shape unchanged since the
   // auth module already ships it in AuthUser.
   role         String   @default("Member")
+  // Relative path under /uploads (e.g. "/uploads/avatars/<uuid>.png"), not
+  // a full URL — the frontend prepends its own API base URL, same as every
+  // other API path it calls.
+  avatarUrl    String?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -37,6 +41,7 @@ model User {
   channelMemberships    ChannelMember[]
   messages              Message[]
   notificationPreference NotificationPreference?
+  passwordResetTokens   PasswordResetToken[]
 }
 
 model Organization {
@@ -49,6 +54,8 @@ model Organization {
   // "DEV-241" — one sequence per org, shared across all of its projects,
   // matching the frontend's mock task-id format.
   taskCounter   Int      @default(0)
+  // Same relative-path convention as User.avatarUrl.
+  logoUrl       String?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
@@ -70,6 +77,7 @@ enum OrgRole {
   ADMIN
   MANAGER
   MEMBER
+  VIEWER
 }
 
 model OrganizationMember {
@@ -222,6 +230,13 @@ model Notification {
   category    NotificationCategory
   unread      Boolean              @default(true)
   createdAt   DateTime             @default(now())
+  // Optional deep link, e.g. targetType: "task", targetRef: the task's code
+  // ("DEV-42") — a route-ready string rather than ActivityEntry's numeric
+  // targetId, since the only current consumer (the notification bell)
+  // needs to build a /tasks/:code URL, not re-look-up a row by id. Null on
+  // notifications with nothing to link to (e.g. SYSTEM).
+  targetType  String?
+  targetRef   String?
 
   recipient User  @relation("NotificationRecipient", fields: [recipientId], references: [id])
   actor     User? @relation("NotificationActor", fields: [actorId], references: [id])
@@ -279,9 +294,25 @@ model Invitation {
   token          String    @unique
   expiresAt      DateTime
   acceptedAt     DateTime?
+  revokedAt      DateTime?
   createdAt      DateTime  @default(now())
 
   organization Organization @relation(fields: [organizationId], references: [id])
+}
+
+// One row per requested reset — never reused, only ever updated to set
+// usedAt. Requesting a new reset link invalidates every other outstanding
+// token for that user (see AuthService.forgotPassword), so at most one
+// token is ever valid at a time.
+model PasswordResetToken {
+  id        Int       @id @default(autoincrement())
+  userId    Int
+  token     String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id])
 }
 
 // Lazily created on first read (see NotificationPreferencesService) rather

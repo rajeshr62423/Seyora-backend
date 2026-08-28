@@ -6,6 +6,7 @@ export interface AuthUser {
   email: string;
   role: string;
   initials: string;
+  avatarUrl: string | null;
 }
 
 export interface AuthTokens {
